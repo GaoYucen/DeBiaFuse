@@ -236,6 +236,20 @@ class DLAFullJointModel(Model):
         total_pred = tf.add_n(ar_preds + lstm_preds)
         return ar_preds + lstm_preds + [total_pred]
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "alpha": self.alpha,
+            "beta": self.beta,
+            # ar_models/lstm_models 不能序列化
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        # 需要手动传递 ar_models, lstm_models
+        return cls(ar_models=None, lstm_models=None, alpha=config["alpha"], beta=config["beta"])
+
 #%% 8. 模型训练与预测流程
 def train_dla_model(dataset, params):
     """
@@ -312,7 +326,12 @@ def train_dla_model(dataset, params):
     )
     
     # Step 6: 预测测试集
-    ar_Y_pred_test, lstm_Y_pred_test, total_Y_pred_test = joint_model.predict([ar_X_test, lstm_X_test])  # Update prediction input
+    preds = joint_model.predict([ar_X_test, lstm_X_test])
+    n_ar = len(ar_models)
+    n_lstm = len(lstm_models)
+    ar_Y_pred_test = preds[:n_ar]
+    lstm_Y_pred_test = preds[n_ar:n_ar+n_lstm]
+    total_Y_pred_test = preds[-1]
     
     return (ar_Y_pred_test, lstm_Y_pred_test, total_Y_pred_test), \
            (joint_model, ar_models, lstm_models)  # Ensure this returns the correct models
@@ -350,10 +369,9 @@ def plot_results(dates, y_true, y_pred, file_name, params):
     fig, ax = plt.subplots(figsize=(40, 10))
     # 筛选画图日期范围内的数据（确保长度一致）
     plot_dates = pd.date_range(start=params.date_start, end=params.date_end)
-    # 截取测试集数据（与dates对齐）
-    test_dates = pd.to_datetime(dates[train_size + params.look_back:train_size + params.look_back + len(y_true)])
-    # 绘制
-    ax.plot(test_dates, y_true[:, 0], label='Origin (1st Step)', linestyle='-', linewidth=2, color='blue')  # 取预测第一步对比
+    # 修正：dates为滑窗末端日期
+    test_dates = pd.to_datetime(dates)
+    ax.plot(test_dates, y_true[:, 0], label='Origin (1st Step)', linestyle='-', linewidth=2, color='blue')
     ax.plot(test_dates, y_pred[:, 0], label='Prediction (1st Step)', linestyle='-.', linewidth=4, color='red')
     # 日期格式设置
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
@@ -400,8 +418,7 @@ if __name__ == "__main__":
     
     for file in filelist:
         print(f"\n=== Processing File: {file} ===")
-        file_name = file[:8]  # 提取文件名前缀（与原代码一致）
-        
+        file_name = file[:8]
         # Step 1: 读取数据
         dataset, dates = read_data(params.data_path + file)
         print(f"Data shape: {dataset.shape}, Date range: {dates[0]} ~ {dates[-1]}")
@@ -410,27 +427,42 @@ if __name__ == "__main__":
         
         # Step 3: 训练DLA模型
         (ar_Y_pred, lstm_Y_pred, total_Y_pred), \
-        (joint_model, ar_model, lstm_model) = train_dla_model(dataset, params)
+        (joint_model, ar_models, lstm_models) = train_dla_model(dataset, params)
 
         # 准备真实值（测试集）
         train_size = int(len(dataset) * 0.8)
-        ar_Y_true = dataset[train_size + params.look_back:train_size + params.look_forward + params.look_back]
-        lstm_Y_true = ar_Y_true  # 高频数据的真实值与低中
-        total_Y_true = ar_Y_true  # 总体真实值与低中频相同（因为是加和）
-        # 展平预测值
+        # === 修正：用滑窗生成真实标签，与预测输出shape一致 ===
+        # 低中频（AR）真实标签
+        X_T, imfs_low, imfs_high, X_D = decompose_data(dataset, params)
+        ar_targets = [X_T] + imfs_low
+        lstm_targets = imfs_high + [X_D]
+        # 生成测试集滑窗标签
+        ar_X_test_list, ar_Y_true_list = get_windows_list(ar_targets, params.look_back, params.look_forward, len(ar_targets[0]) - train_size)
+        lstm_X_test_list, lstm_Y_true_list = get_windows_list(lstm_targets, params.look_back, params.look_forward, len(lstm_targets[0]) - train_size)
+        # 总体真实标签
+        total_Y_true = np.sum(ar_Y_true_list + lstm_Y_true_list, axis=0)
+
+        # 预测值reshape
+        n_ar = len(ar_targets)
+        n_lstm = len(lstm_targets)
+        if isinstance(ar_Y_pred, list):
+            ar_Y_pred = ar_Y_pred[0]
+        if isinstance(lstm_Y_pred, list):
+            lstm_Y_pred = lstm_Y_pred[0]
         ar_Y_pred = ar_Y_pred.reshape(-1, params.look_forward)
         lstm_Y_pred = lstm_Y_pred.reshape(-1, params.look_forward)
         total_Y_pred = total_Y_pred.reshape(-1, params.look_forward)
         # 截取与真实值长度一致的部分
-        ar_Y_pred = ar_Y_pred[:len(ar_Y_true)]
-        lstm_Y_pred = lstm_Y_pred[:len(lstm_Y_true)]
+        ar_Y_pred = ar_Y_pred[:len(ar_Y_true_list[0])]
+        lstm_Y_pred = lstm_Y_pred[:len(lstm_Y_true_list[0])]
         total_Y_pred = total_Y_pred[:len(total_Y_true)]
         print(f"Test set size: {len(total_Y_true)} samples")
-        
+
         # Step 4: 评估模型
-        ar_mae, ar_rmse, ar_mse, ar_r2 = evaluate_model(ar_Y_true, ar_Y_pred, "AR (Low-Mid)")  # Update true values
-        lstm_mae, lstm_rmse, lstm_mse, lstm_r2 = evaluate_model(lstm_Y_true, lstm_Y_pred, "LSTM (High)")  # Update true values
-        total_mae, total_rmse, total_mse, total_r2 = evaluate_model(total_Y_true, total_Y_pred, "Total (DLA)")  # Ensure this is correct
+        # 只评估第一个AR和LSTM分量（主分量），如需全部可遍历
+        ar_mae, ar_rmse, ar_mse, ar_r2 = evaluate_model(ar_Y_true_list[0], ar_Y_pred, "AR (Low-Mid)")
+        lstm_mae, lstm_rmse, lstm_mse, lstm_r2 = evaluate_model(lstm_Y_true_list[0], lstm_Y_pred, "LSTM (High)")
+        total_mae, total_rmse, total_mse, total_r2 = evaluate_model(total_Y_true, total_Y_pred, "Total (DLA)")
 
         # Step 5: 保存日志
         metrics = {
@@ -442,15 +474,21 @@ if __name__ == "__main__":
         # Step 6: 保存模型
         if not os.path.exists('param/DLA-paper'):
             os.makedirs('param/DLA-paper')
-        # 保存联合模型为 SavedModel 格式
         joint_model.save(f'param/DLA-paper/{file_name}_joint', save_format='tf')
-        # LSTM子模型可用keras格式
-        lstm_model.save(f'param/DLA-paper/{file_name}_lstm.keras')
+        lstm_models[0].save(f'param/DLA-paper/{file_name}_lstm.keras')
         print(f"Models saved to param/DLA-paper/{file_name}_joint (SavedModel) and {file_name}_lstm.keras")
         
         # Step 7: 可视化结果
-        train_size = int(len(dataset) * 0.8)
-        plot_results(dates, total_Y_true, total_Y_pred, file_name, params)
+        # 修正：用滑窗末端日期作为test_dates，防止越界
+        # dates: 原始日期序列
+        # total_Y_true: 测试集样本数
+        # 计算每个测试样本对应的末端日期索引
+        max_idx = len(dates) - 1
+        test_date_indices = [
+            min(train_size + params.look_back + i + params.look_forward - 1, max_idx)
+            for i in range(len(total_Y_true))
+        ]
+        test_dates = [dates[idx] for idx in test_date_indices]
+        plot_results(test_dates, total_Y_true, total_Y_pred, file_name, params)
         # plot_attention(attention_weights, file_name, params)
-        
         print(f"=== File {file} Processed ===")
