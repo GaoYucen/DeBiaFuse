@@ -59,25 +59,31 @@ for file in filelist:
     model = Sequential()
     model.add(LSTM(4, input_shape=(1, look_back)))
     model.add(Dense(look_forward))
-    # model.compile(loss='mean_squared_error', optimizer='adam')
+    model.compile(loss='mean_squared_error', optimizer='adam')
 
-    # #%% Fitting the LSTM model on the training data
-    # # model.fit(train_x, train_y, epochs=100, batch_size=1, verbose=2)
-    # # 带EarlyStopping进行训练
-    # # 参数设置：https://blog.csdn.net/yangwohenmai1/article/details/123274494
-    # from keras.callbacks import EarlyStopping
-    # early_stopping = EarlyStopping(monitor='loss', mode='min', patience=80, verbose=1)
-    # start = time.time()
-    # model.fit(train_x, train_y, epochs=1000, validation_data=(test_x, test_y), batch_size=32, verbose=1, callbacks=[early_stopping])
-    # end = time.time()
-    # print('训练时间：', end-start)
-    #
-    # #%% 存储模型参数
-    # model.save('param//LSTM'+file+'.h5')
+    #%% Fitting the LSTM model on the training data
+    # model.fit(train_x, train_y, epochs=100, batch_size=1, verbose=2)
+    # 带EarlyStopping进行训练
+    # 参数设置：https://blog.csdn.net/yangwohenmai1/article/details/123274494
+    from keras.callbacks import EarlyStopping
+    early_stopping = EarlyStopping(monitor='loss', mode='min', patience=80, verbose=1)
+    start = time.time()
+    model.fit(train_x, train_y, epochs=1000, validation_data=(test_x, test_y), batch_size=32, verbose=1, callbacks=[early_stopping])
+    end = time.time()
+    print('训练时间：', end-start)
+    
+    #%% 存储模型参数
+    if look_back == params.look_back and look_forward == params.look_forward:
+        model.save('param/LSTM'+file+'.keras')
+    else:
+        model.save('param/long_LSTM'+file+'.keras')
 
     #%% 读取模型参数
     from keras.models import load_model
-    model = load_model('param//LSTM'+file+'.h5', compile=False)
+    if look_back == params.look_back and look_forward == params.look_forward:
+        model = load_model('param/LSTM'+file+'.keras', compile=False)
+    else:
+        model = load_model('param/long_LSTM'+file+'.keras', compile=False)
 
     #%%
     # Making predictions on the test data
@@ -136,7 +142,10 @@ for file in filelist:
     import matplotlib.dates as mdates
 
     # 创建日期范围
-    dates = pd.date_range(start='2023-06-08', end='2023-12-15')
+    if look_back == params.look_back and look_forward == params.look_forward:
+        dates = pd.date_range(start='2024-06-08', end='2024-12-15')
+    else:
+        dates = pd.date_range(start='2024-07-14', end='2024-12-15')
 
     # 创建图形
     fig, ax = plt.subplots(figsize=(40, 10))
@@ -150,7 +159,7 @@ for file in filelist:
     ax.set_xlabel('Date', fontsize=fontsize_tmp)
 
     # 设置y轴标签
-    ax.set_ylabel('Deflection (m)', fontsize=fontsize_tmp)
+    ax.set_ylabel('Deflection (mm)', fontsize=fontsize_tmp)
 
     # 设置x轴和y轴的刻度字体大小
     plt.xticks(fontsize=fontsize_tmp)
@@ -158,4 +167,8 @@ for file in filelist:
 
     # 显示图例
     plt.legend(prop={'size': fontsize_tmp}, loc='lower left')
-    plt.savefig('graph/LSTM'+file[0:8] + '.pdf', bbox_inches='tight')
+    if look_back == params.look_back and look_forward == params.look_forward:
+        plt.savefig('graph/LSTM'+file[0:8] + '.pdf', bbox_inches='tight')
+    else:
+        plt.savefig('graph/long_LSTM'+file[0:8] + '.pdf', bbox_inches='tight')
+    

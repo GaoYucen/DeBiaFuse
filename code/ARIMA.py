@@ -126,7 +126,11 @@ for file in filelist:
     import matplotlib.dates as mdates
 
     # 创建日期范围
-    dates = pd.date_range(start='2023-06-08', end='2023-12-15')
+    if look_back == params.look_back and look_forward == params.look_forward:
+        dates = pd.date_range(start='2024-06-08', end='2024-12-15')
+    else:
+        dates = pd.date_range(start='2024-07-14', end='2024-12-15')
+
 
     # 创建图形
     fig, ax = plt.subplots(figsize=(40, 10))
@@ -140,7 +144,7 @@ for file in filelist:
     ax.set_xlabel('Date', fontsize=fontsize_tmp)
 
     # 设置y轴标签
-    ax.set_ylabel('Deflection (m)', fontsize=fontsize_tmp)
+    ax.set_ylabel('Deflection (mm)', fontsize=fontsize_tmp)
 
     # 设置x轴和y轴的刻度字体大小
     plt.xticks(fontsize=fontsize_tmp)
@@ -148,4 +152,8 @@ for file in filelist:
 
     # 显示图例
     plt.legend(prop={'size': fontsize_tmp}, loc='lower left')
-    plt.savefig('graph/ARIMA' + file[0:8] + '.pdf', bbox_inches='tight')
+    if look_back == params.look_back and look_forward == params.look_forward:
+        plt.savefig('graph/ARIMA' + file[0:8] + '.pdf', bbox_inches='tight')
+    else:
+        plt.savefig('graph/long_ARIMA' + file[0:8] + '.pdf', bbox_inches='tight')
+    
