@@ -24,7 +24,8 @@ from cross_models.cross_former import Crossformer
 class Config:
     def __init__(self):
         # 数据参数
-        self.data_path = '../data/Hongfu/deflection/'  # 数据目录
+        # Resolve from the repository root when launched as ``python code/DeBiaFuse.py``.
+        self.data_path = 'DLA/data/Hongfu/deflection/'
         self.date_start = '2023-06-08'
         self.date_end = '2023-12-15'
 
@@ -75,9 +76,9 @@ params = Config()
 
 #%% 2. 数据读取与预处理
 def read_data(filepath):
-    data = pd.read_excel(filepath)
+    data = pd.read_excel(filepath, engine='xlrd')
     data['时间'] = data['时间'].astype(str)
-    df = data.groupby(data['时间'].str[:10])['测量的桥面系挠度值'].mean().reset_index(name='mean_value')
+    df = data.groupby(data['时间'].str[:10], sort=True)['测量的桥面系挠度值'].mean().reset_index(name='mean_value')
     values = df['mean_value'].values.astype(float)
     return values, df['时间'].values
 
@@ -87,10 +88,8 @@ def decompose_data(dataset: np.ndarray, params: Config):
     n = len(dataset)
     window = params.moving_avg_window
 
-    pad_left = (window - 1) // 2
-    pad_right = window // 2
-    dataset_padded = np.pad(dataset, (pad_left, pad_right), mode='edge')
-    X_T = np.convolve(dataset_padded, np.ones(window) / window, mode='valid')
+    # Causal trend: no value at t may depend on observations after t.
+    X_T = pd.Series(dataset).rolling(window, min_periods=1).mean().to_numpy(dtype=np.float32)
 
     X_R = dataset - X_T
 
@@ -123,12 +122,17 @@ def create_sliding_windows(dataset: np.ndarray, look_back: int, look_forward: in
     return np.array(X), np.array(Y)
 
 
-def get_windows_list(targets: List[np.ndarray], look_back: int, look_forward: int, size: int):
+def get_windows_list(targets: List[np.ndarray], look_back: int, look_forward: int,
+                     start: int = 0, end: int = None):
+    """Build windows by target timestamp; never use a prefix for test data."""
     X_list, Y_list = [], []
     for target in targets:
         X, Y = create_sliding_windows(target, look_back, look_forward)
-        X_list.append(X[:size])
-        Y_list.append(Y[:size])
+        # create_sliding_windows target t corresponds to raw index t+look_back.
+        first = max(0, start - look_back)
+        last = None if end is None else max(0, end - look_back)
+        X_list.append(X[first:last])
+        Y_list.append(Y[first:last])
     return X_list, Y_list
 
 
@@ -447,13 +451,13 @@ def train_debiafuse_lstm_crossformer(dataset: np.ndarray, params: Config):
 
     # LSTM 目标（低中频）：趋势 + 低频IMF
     lm_targets = [X_T] + imfs_low
-    lm_X_train_list, lm_Y_train_list = get_windows_list(lm_targets, params.look_back, params.look_forward, train_size)
-    lm_X_test_list, lm_Y_test_list = get_windows_list(lm_targets, params.look_back, params.look_forward, len(lm_targets[0]) - train_size)
+    lm_X_train_list, lm_Y_train_list = get_windows_list(lm_targets, params.look_back, params.look_forward, 0, train_size)
+    lm_X_test_list, lm_Y_test_list = get_windows_list(lm_targets, params.look_back, params.look_forward, train_size, len(lm_targets[0]))
 
     # Crossformer 目标（高频）：高频IMF + 残差
     hf_targets = imfs_high + [X_D]
-    hf_X_train_list, hf_Y_train_list = get_windows_list(hf_targets, params.look_back, params.look_forward, train_size)
-    hf_X_test_list, hf_Y_test_list = get_windows_list(hf_targets, params.look_back, params.look_forward, len(hf_targets[0]) - train_size)
+    hf_X_train_list, hf_Y_train_list = get_windows_list(hf_targets, params.look_back, params.look_forward, 0, train_size)
+    hf_X_test_list, hf_Y_test_list = get_windows_list(hf_targets, params.look_back, params.look_forward, train_size, len(hf_targets[0]))
 
     device = torch.device('cuda' if params.use_gpu else 'cpu')
     
@@ -553,13 +557,15 @@ if __name__ == "__main__":
 
         # 与真实值长度对齐
         total_pred = total_pred[:len(total_Y_true)]
-        lm_pred = lm_sum_pred[:len(lm_Y_test_list[0])]
-        cf_pred = cf_sum_pred[:len(hf_Y_test_list[0])]
+        lm_true = np.sum(lm_Y_test_list, axis=0).astype(np.float32)
+        cf_true = np.sum(hf_Y_test_list, axis=0).astype(np.float32)
+        lm_pred = lm_sum_pred[:len(lm_true)]
+        cf_pred = cf_sum_pred[:len(cf_true)]
 
         # 评估
         # 修改 AR 为 LSTM
-        lm_mae, lm_rmse, lm_mse, lm_r2 = evaluate_model(lm_Y_test_list[0], lm_pred, "LSTM (Low-Mid)")
-        cf_mae, cf_rmse, cf_mse, cf_r2 = evaluate_model(hf_Y_test_list[0], cf_pred, "Crossformer (High)")
+        lm_mae, lm_rmse, lm_mse, lm_r2 = evaluate_model(lm_true[:len(lm_pred)], lm_pred, "LSTM (Low-Mid)")
+        cf_mae, cf_rmse, cf_mse, cf_r2 = evaluate_model(cf_true[:len(cf_pred)], cf_pred, "Crossformer (High)")
         total_mae, total_rmse, total_mse, total_r2 = evaluate_model(total_Y_true, total_pred, "Total (DeBiaFuse)")
 
         metrics = {
