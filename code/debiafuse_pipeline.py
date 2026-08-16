@@ -23,7 +23,7 @@ class TimeSplit:
     test_dates: np.ndarray
 
 
-def read_hongfu(path: str):
+def read_hongfu(path: str, return_mask=False):
     df = pd.read_excel(path, engine="xlrd")
     required = {"时间", "测量的桥面系挠度值"}
     missing = required.difference(df.columns)
@@ -33,9 +33,12 @@ def read_hongfu(path: str):
     values = pd.to_numeric(df["测量的桥面系挠度值"], errors="coerce")
     clean = pd.DataFrame({"date": dates, "value": values}).dropna()
     daily = clean.groupby("date", sort=True)["value"].mean()
-    if daily.index.has_duplicates or not daily.index.is_monotonic_increasing:
-        raise ValueError("Daily dates must be unique and chronological")
-    return daily.to_numpy(dtype=np.float32), daily.index.to_numpy(dtype="datetime64[ns]")
+    full = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    daily = daily.reindex(full)
+    missing = daily.isna().to_numpy()
+    daily = daily.ffill().bfill()
+    out = (daily.to_numpy(dtype=np.float32), full.to_numpy(dtype="datetime64[ns]"))
+    return (*out, missing.astype(np.float32)) if return_mask else out
 
 
 def hongfu_quality_report(path: str):
@@ -120,14 +123,14 @@ def spectral_features(component, fs=1.0):
     return np.array([float(freqs[int(np.argmax(spectrum))]), centroid, bandwidth, energy], dtype=np.float32)
 
 
-def window_local_emd(history, n_high=3):
+def window_local_emd(history, n_high=3, trend_window=30):
     """Decompose one historical window only; output fixed K high components + residual."""
     history = np.asarray(history, dtype=np.float32)
     if len(history) < 4:
         out = np.zeros((n_high + 1, len(history)), dtype=np.float32)
         out[-1] = history
         return history.copy(), out, np.zeros(n_high, dtype=np.float32)
-    trend = causal_moving_average(history, min(30, len(history)))
+    trend = causal_moving_average(history, min(trend_window, len(history)))
     residual = history - trend
     imfs = EMD()(residual) if EMD is not None else []
     comps = [] if imfs is None else [np.asarray(v, dtype=np.float32) for v in imfs]
@@ -145,7 +148,8 @@ def window_local_emd(history, n_high=3):
 
 
 def make_decomposed_windows(values, look_back, horizon, n_high=3,
-                            target_start=0, target_end=None):
+                            target_start=0, target_end=None,
+                            decomp_context=90, trend_window=30):
     """Create causal decomposition tensors for forecasting windows.
 
     For every input and target timestamp, decomposition sees only the prefix
@@ -158,7 +162,7 @@ def make_decomposed_windows(values, look_back, horizon, n_high=3,
     cache = {}
     def at(idx):
         if idx not in cache:
-            lo, hi, ma = window_local_emd(values[max(0, idx - look_back + 1):idx + 1], n_high)
+            lo, hi, ma = window_local_emd(values[max(0, idx - decomp_context + 1):idx + 1], n_high, trend_window)
             cache[idx] = (lo[-1], hi[:, -1], ma)
         return cache[idx]
     for t in range(max(look_back, target_start), target_end - horizon + 1):
@@ -173,7 +177,9 @@ def make_decomposed_windows(values, look_back, horizon, n_high=3,
         # high includes K IMF slots and a residual slot; mask applies to IMF slots.
         X_low.append(low_hist); X_hf.append(np.asarray(high_hist))
         Y_low.append(low_targets); Y_hf.append(np.asarray(high_targets))
-        masks.append(np.concatenate([mask, np.ones(1, dtype=np.float32)])); starts.append(t)
+        # mask is historical only: use the forecast-origin predecessor.
+        _, _, hist_mask = at(t - 1)
+        masks.append(np.concatenate([hist_mask, np.ones(1, dtype=np.float32)])); starts.append(t)
     return (np.asarray(X_low, dtype=np.float32), np.asarray(X_hf, dtype=np.float32),
             np.asarray(Y_low, dtype=np.float32), np.asarray(Y_hf, dtype=np.float32),
             np.asarray(masks, dtype=np.float32), np.asarray(starts, dtype=np.int64))
@@ -186,14 +192,21 @@ class FactorizedBiaxialAttention(nn.Module):
         self.component = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
         self.norm1, self.norm2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
 
-    def forward(self, x):  # [B, L, N, D]
+    def forward(self, x, component_mask=None):  # [B, L, N, D]
         b, l, n, d = x.shape
         t = x.permute(0, 2, 1, 3).reshape(b * n, l, d)
         t, _ = self.temporal(t, t, t)
         t = self.norm1(t).reshape(b, n, l, d).permute(0, 2, 1, 3)
         c = t.reshape(b * l, n, d)
-        c, _ = self.component(c, c, c)
-        return self.norm2(c).reshape(b, l, n, d)
+        key_mask = None
+        if component_mask is not None:
+            cm = component_mask[:, None, :].expand(b, l, n).reshape(b * l, n) < 0.5
+            key_mask = cm
+        c, _ = self.component(c, c, c, key_padding_mask=key_mask)
+        out = self.norm2(c).reshape(b, l, n, d)
+        if component_mask is not None:
+            out = out * component_mask[:, None, :, None]
+        return out
 
 
 class JointHighFrequencyModel(nn.Module):
@@ -207,8 +220,12 @@ class JointHighFrequencyModel(nn.Module):
 
     def forward(self, x, component_mask=None):  # [B, L, N]
         h = self.value(x.unsqueeze(-1)) + self.component_embedding
+        if component_mask is not None:
+            h = h * component_mask[:, None, :, None]
         for block in self.blocks:
-            h = h + block(h)
+            h = h + block(h, component_mask)
+            if component_mask is not None:
+                h = h * component_mask[:, None, :, None]
         if component_mask is not None:
             h = h * component_mask[:, None, :, None]
         h = h.permute(0, 2, 1, 3).reshape(x.shape[0], self.n_components, -1)

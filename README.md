@@ -86,3 +86,27 @@ neither direct nor residual mode currently beats Persistence. The direct mode
 is consistently better than residual mode. These results are retained as the
 current correctness checkpoint; further architecture additions should wait
 until the model demonstrates positive skill over Persistence.
+
+## DeBiaFuse v3 correctness results
+
+The v3 rerun adds a complete daily calendar with causal forward-fill,
+forecast-origin-only component masks, coherent residual targets, separate
+decomposition context and trend window, and horizon-wise metrics. Results are
+stored separately from the v2 checkpoint:
+
+- `results/debiafuse_v3_24to6_direct.json/csv`
+- `results/debiafuse_v3_24to6_residual.json/csv`
+- `results/debiafuse_v3_60to30_direct.json/csv`
+- `results/debiafuse_v3_60to30_residual.json/csv`
+
+| Setting | Direct average Skill_MAE | Residual average Skill_MAE |
+|---|---:|---:|
+| 24→6 | approximately -0.25 | approximately -0.03 |
+| 60→30 | approximately -0.67 | approximately +0.03 |
+
+The corrected residual formulation is substantially better than the v2
+residual checkpoint. The strongest current result is 60→30 residual mode,
+which achieves positive skill on DD-ES-09, DD-WN-09 and DD-WS-09, including
+approximately +0.17 on DD-WS-09. The 24→6 settings still do not beat
+Persistence, so these results remain a correctness checkpoint rather than a
+final DSE benchmark claim.

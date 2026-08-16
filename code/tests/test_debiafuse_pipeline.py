@@ -52,3 +52,14 @@ def test_window_local_decomposition_shapes():
     assert yh.shape[1:] == (4, 3)
     assert mask.shape[1:] == (3,)  # IMF slots + residual
     assert starts[0] == 12
+
+
+def test_residual_component_reconstruction_identity():
+    low_x = np.array([[1., 2., 3.]], dtype=np.float32)
+    high_x = np.array([[[.1, .2], [.2, .1], [.3, .2]]], dtype=np.float32)
+    low_y = np.array([[4., 5.]], dtype=np.float32)
+    high_y = np.array([[[.4, .3], [.5, .4]]], dtype=np.float32)
+    base = low_x[:, -1] + high_x[:, -1, :].sum(-1)
+    delta = low_y - low_x[:, -1, None] + (high_y - high_x[:, -1, None, :]).sum(-1)
+    total = low_y + high_y.sum(-1)
+    assert np.allclose(delta, total - base[:, None])
