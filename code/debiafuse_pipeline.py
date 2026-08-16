@@ -1,6 +1,7 @@
 """Leakage-safe data and joint multi-component modelling utilities."""
 from dataclasses import dataclass
 from typing import Iterable, Optional
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,20 @@ def read_hongfu(path: str):
     if daily.index.has_duplicates or not daily.index.is_monotonic_increasing:
         raise ValueError("Daily dates must be unique and chronological")
     return daily.to_numpy(dtype=np.float32), daily.index.to_numpy(dtype="datetime64[ns]")
+
+
+def hongfu_quality_report(path: str):
+    df = pd.read_excel(path, engine="xlrd")
+    raw_dates = pd.to_datetime(df["时间"].astype(str).str[:10], errors="coerce")
+    vals = pd.to_numeric(df["测量的桥面系挠度值"], errors="coerce")
+    valid = pd.DataFrame({"date": raw_dates, "value": vals}).dropna(subset=["date"])
+    daily = valid.groupby("date")["value"].mean().sort_index()
+    expected = pd.date_range(daily.index.min(), daily.index.max(), freq="D") if len(daily) else pd.DatetimeIndex([])
+    return {"dataset": Path(path).name, "date_start": str(daily.index.min().date()) if len(daily) else "",
+            "date_end": str(daily.index.max().date()) if len(daily) else "", "expected_days": len(expected),
+            "observed_days": len(daily), "missing_days": len(expected.difference(daily.index)),
+            "missing_ratio": len(expected.difference(daily.index)) / max(1, len(expected)),
+            "duplicate_raw_dates": int(raw_dates.dropna().duplicated().sum()), "nan_raw_values": int(vals.isna().sum())}
 
 
 def chronological_split(values, dates, train_ratio=0.7, val_ratio=0.1) -> TimeSplit:
@@ -108,6 +123,10 @@ def spectral_features(component, fs=1.0):
 def window_local_emd(history, n_high=3):
     """Decompose one historical window only; output fixed K high components + residual."""
     history = np.asarray(history, dtype=np.float32)
+    if len(history) < 4:
+        out = np.zeros((n_high + 1, len(history)), dtype=np.float32)
+        out[-1] = history
+        return history.copy(), out, np.zeros(n_high, dtype=np.float32)
     trend = causal_moving_average(history, min(30, len(history)))
     residual = history - trend
     imfs = EMD()(residual) if EMD is not None else []
@@ -136,19 +155,25 @@ def make_decomposed_windows(values, look_back, horizon, n_high=3,
     values = np.asarray(values, dtype=np.float32)
     target_end = len(values) if target_end is None else min(target_end, len(values))
     X_low, X_hf, Y_low, Y_hf, masks, starts = [], [], [], [], [], []
+    cache = {}
+    def at(idx):
+        if idx not in cache:
+            lo, hi, ma = window_local_emd(values[max(0, idx - look_back + 1):idx + 1], n_high)
+            cache[idx] = (lo[-1], hi[:, -1], ma)
+        return cache[idx]
     for t in range(max(look_back, target_start), target_end - horizon + 1):
         low_hist, high_hist = [], []
         for idx in range(t - look_back, t):
-            low, high, _ = window_local_emd(values[:idx + 1], n_high)
-            low_hist.append(low[-1]); high_hist.append(high[:, -1])
+            low, high, _ = at(idx)
+            low_hist.append(low); high_hist.append(high)
         low_targets, high_targets = [], []
         for idx in range(t, t + horizon):
-            low, high, mask = window_local_emd(values[:idx + 1], n_high)
-            low_targets.append(low[-1]); high_targets.append(high[:, -1])
+            low, high, mask = at(idx)
+            low_targets.append(low); high_targets.append(high)
         # high includes K IMF slots and a residual slot; mask applies to IMF slots.
         X_low.append(low_hist); X_hf.append(np.asarray(high_hist))
         Y_low.append(low_targets); Y_hf.append(np.asarray(high_targets))
-        masks.append(mask); starts.append(t)
+        masks.append(np.concatenate([mask, np.ones(1, dtype=np.float32)])); starts.append(t)
     return (np.asarray(X_low, dtype=np.float32), np.asarray(X_hf, dtype=np.float32),
             np.asarray(Y_low, dtype=np.float32), np.asarray(Y_hf, dtype=np.float32),
             np.asarray(masks, dtype=np.float32), np.asarray(starts, dtype=np.int64))

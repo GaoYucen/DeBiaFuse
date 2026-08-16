@@ -133,7 +133,8 @@ def run_file(path, args):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--data-dir", default="DLA/data/Hongfu/deflection"); ap.add_argument("--output", default="results/baselines_hongfu.json")
+    root = Path(__file__).resolve().parents[1]
+    ap = argparse.ArgumentParser(); ap.add_argument("--data-dir", default=str(root / "data" / "Hongfu" / "deflection")); ap.add_argument("--output", default="results/baselines_hongfu.json")
     ap.add_argument("--look-back", type=int, default=24); ap.add_argument("--horizon", type=int, default=6); ap.add_argument("--epochs", type=int, default=50); ap.add_argument("--batch-size", type=int, default=64); ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--models", default="persistence,arima,lstm,dlinear,crossformer,uni2ts"); ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu"); args = ap.parse_args(); args.models = [x.strip() for x in args.models.split(",")]
     torch.manual_seed(args.seed); np.random.seed(args.seed); rows = []

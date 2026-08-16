@@ -78,7 +78,7 @@ def fit_one(path, look_back, horizon, epochs, batch_size, seed):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-dir", default="DLA/data/Hongfu/deflection")
+    ap.add_argument("--data-dir", default=str(Path(__file__).resolve().parents[1] / "data" / "Hongfu" / "deflection"))
     ap.add_argument("--look-back", type=int, default=24)
     ap.add_argument("--horizon", type=int, default=6)
     ap.add_argument("--epochs", type=int, default=50)

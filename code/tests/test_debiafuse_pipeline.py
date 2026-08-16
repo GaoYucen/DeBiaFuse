@@ -50,5 +50,5 @@ def test_window_local_decomposition_shapes():
     assert xh.shape[1:] == (8, 3)  # 2 IMF slots + residual
     assert yl.shape[1:] == (4,)
     assert yh.shape[1:] == (4, 3)
-    assert mask.shape[1:] == (2,)
+    assert mask.shape[1:] == (3,)  # IMF slots + residual
     assert starts[0] == 12
